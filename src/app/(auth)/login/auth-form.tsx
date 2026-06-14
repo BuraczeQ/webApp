@@ -1,11 +1,25 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { login, signup } from './actions'
+
+const DEMO_EMAIL = 'admin@admin.com'
+const DEMO_PASSWORD = 'admin'
 
 export default function AuthForm({ message }: { message?: string }) {
   const [mode, setMode] = useState<'login' | 'signup'>('login')
   const isSignup = mode === 'signup'
+  const formRef = useRef<HTMLFormElement>(null)
+
+  const fillDemo = () => {
+    setMode('login')
+    const form = formRef.current
+    if (!form) return
+    const email = form.elements.namedItem('email') as HTMLInputElement | null
+    const password = form.elements.namedItem('password') as HTMLInputElement | null
+    if (email) email.value = DEMO_EMAIL
+    if (password) password.value = DEMO_PASSWORD
+  }
 
   return (
     <div className="w-full max-w-sm rounded-2xl border border-neutral-200 bg-white p-8 shadow-sm">
@@ -33,12 +47,18 @@ export default function AuthForm({ message }: { message?: string }) {
         </button>
       </div>
 
-      <form action={isSignup ? signup : login} className="space-y-4">
+      <form ref={formRef} action={isSignup ? signup : login} className="space-y-4">
         {isSignup && (
           <Field name="full_name" label="Full name" type="text" required />
         )}
         <Field name="email" label="Email" type="email" required />
-        <Field name="password" label="Password" type="password" required minLength={6} />
+        <Field
+          name="password"
+          label="Password"
+          type="password"
+          required
+          minLength={isSignup ? 6 : undefined}
+        />
 
         <button
           type="submit"
@@ -52,6 +72,23 @@ export default function AuthForm({ message }: { message?: string }) {
         <p className="mt-4 rounded-lg bg-neutral-100 px-3 py-2 text-center text-sm text-neutral-700">
           {message}
         </p>
+      )}
+
+      {!isSignup && (
+        <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+          <p className="font-medium text-amber-900">Just want to look around?</p>
+          <p className="mt-1 text-amber-800">
+            Use the demo account — email <span className="font-mono font-semibold">{DEMO_EMAIL}</span>,
+            password <span className="font-mono font-semibold">{DEMO_PASSWORD}</span>.
+          </p>
+          <button
+            type="button"
+            onClick={fillDemo}
+            className="mt-2 w-full rounded-md bg-amber-500 px-3 py-2 text-sm font-medium text-white transition hover:bg-amber-600"
+          >
+            Use demo account
+          </button>
+        </div>
       )}
     </div>
   )
