@@ -10,6 +10,7 @@ const links = [
   { href: '/calendar', label: 'Calendar', icon: '▦' },
   { href: '/gallery', label: 'Gallery', icon: '⊞' },
   { href: '/pacman', label: 'Pac-Man', icon: '◉' },
+  { href: '/creative', label: 'Creative', icon: '✦' },
 ]
 
 export default function Sidebar({ email }: { email: string }) {
