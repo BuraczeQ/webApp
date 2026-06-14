@@ -123,6 +123,37 @@ function buildProps(): Prop[] {
   return props
 }
 
+type Coin = { x: number; y: number; taken: boolean; spin: number }
+type BoostPad = { x: number; y: number; angle: number }
+
+function buildCoins(): Coin[] {
+  const rng = mulberry32(99)
+  const coins: Coin[] = []
+  // scattered coins across the world, away from the spawn pad
+  for (let i = 0; i < 46; i++) {
+    const x = 120 + rng() * (WORLD.w - 240)
+    const y = 120 + rng() * (WORLD.h - 240)
+    if (Math.hypot(x - 1900, y - 1350) < 180) continue
+    coins.push({ x, y, taken: false, spin: rng() * Math.PI })
+  }
+  // a tempting wavy trail of coins through the middle
+  for (let i = 0; i < 12; i++) {
+    coins.push({ x: 1320 + i * 110, y: 1350 + Math.sin(i * 0.6) * 160, taken: false, spin: 0 })
+  }
+  return coins
+}
+
+function buildBoosts(): BoostPad[] {
+  return [
+    { x: 1500, y: 900, angle: 0 },
+    { x: 2450, y: 1150, angle: Math.PI / 2 },
+    { x: 1100, y: 1700, angle: -Math.PI / 4 },
+    { x: 2650, y: 1700, angle: Math.PI },
+    { x: 1900, y: 1880, angle: -Math.PI / 2 },
+    { x: 700, y: 1150, angle: Math.PI / 6 },
+  ]
+}
+
 export default function CreativePage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -132,6 +163,8 @@ export default function CreativePage() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [found, setFound] = useState<Set<string>>(new Set())
   const [speedKmh, setSpeedKmh] = useState(0)
+  const [coins, setCoins] = useState(0)
+  const [soundOn, setSoundOn] = useState(false)
 
   // mutable game state kept out of React for 60fps updates
   const g = useRef({
@@ -139,13 +172,73 @@ export default function CreativePage() {
     cam: { x: 1900, y: 1500 },
     keys: new Set<string>(),
     props: buildProps(),
+    coins: buildCoins(),
+    boosts: buildBoosts(),
     particles: [] as Particle[],
     skids: [] as Skid[],
     view: { w: 800, h: 600 },
     nearest: null as Station | null,
     foundLocal: new Set<string>(),
+    coinCount: 0,
+    boostTimer: 0,
     t: 0,
   })
+
+  // WebAudio — created on first user gesture, muted (master gain 0) by default
+  const audioRef = useRef<{
+    ctx: AudioContext
+    master: GainNode
+    engOsc: OscillatorNode
+    engOsc2: OscillatorNode
+    filter: BiquadFilterNode
+  } | null>(null)
+
+  const initAudio = useCallback(() => {
+    if (audioRef.current) return
+    try {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      const ctx = new Ctx()
+      const master = ctx.createGain()
+      master.gain.value = 0 // muted until the user turns sound on
+      master.connect(ctx.destination)
+
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'lowpass'
+      filter.frequency.value = 700
+      const engGain = ctx.createGain()
+      engGain.gain.value = 0.05
+      const engOsc = ctx.createOscillator()
+      engOsc.type = 'sawtooth'
+      engOsc.frequency.value = 55
+      const engOsc2 = ctx.createOscillator()
+      engOsc2.type = 'square'
+      engOsc2.frequency.value = 82
+      engOsc.connect(filter)
+      engOsc2.connect(filter)
+      filter.connect(engGain)
+      engGain.connect(master)
+      engOsc.start()
+      engOsc2.start()
+      audioRef.current = { ctx, master, engOsc, engOsc2, filter }
+    } catch {
+      // audio unavailable — game still works silently
+    }
+  }, [])
+
+  const toggleSound = useCallback(() => {
+    initAudio()
+    setSoundOn((on) => {
+      const next = !on
+      const a = audioRef.current
+      if (a) {
+        a.ctx.resume().catch(() => {})
+        a.master.gain.setTargetAtTime(next ? 0.5 : 0, a.ctx.currentTime, 0.05)
+      }
+      return next
+    })
+  }, [initAudio])
 
   /* ----- input ----- */
   const press = useCallback((k: string, down: boolean) => {
@@ -209,22 +302,56 @@ export default function CreativePage() {
     const ACCEL = 0.22
     const REVERSE = 0.14
     const MAX = 7.6
+    const BOOST = MAX * 1.8
+    const BOOST_MAX = MAX * 1.9
     const FRICTION = 0.94
     const TURN = 0.052
+
+    // short sound effects routed through the (possibly muted) master gain
+    const playBlip = (freq: number) => {
+      const a = audioRef.current
+      if (!a) return
+      const o = a.ctx.createOscillator()
+      const gain = a.ctx.createGain()
+      o.type = 'triangle'
+      o.frequency.setValueAtTime(freq, a.ctx.currentTime)
+      o.frequency.exponentialRampToValueAtTime(freq * 2, a.ctx.currentTime + 0.08)
+      gain.gain.setValueAtTime(0.0001, a.ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.3, a.ctx.currentTime + 0.01)
+      gain.gain.exponentialRampToValueAtTime(0.0001, a.ctx.currentTime + 0.18)
+      o.connect(gain); gain.connect(a.master)
+      o.start(); o.stop(a.ctx.currentTime + 0.2)
+    }
+    const playWhoosh = () => {
+      const a = audioRef.current
+      if (!a) return
+      const o = a.ctx.createOscillator()
+      const gain = a.ctx.createGain()
+      o.type = 'sawtooth'
+      o.frequency.setValueAtTime(180, a.ctx.currentTime)
+      o.frequency.exponentialRampToValueAtTime(900, a.ctx.currentTime + 0.25)
+      gain.gain.setValueAtTime(0.0001, a.ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.22, a.ctx.currentTime + 0.03)
+      gain.gain.exponentialRampToValueAtTime(0.0001, a.ctx.currentTime + 0.35)
+      o.connect(gain); gain.connect(a.master)
+      o.start(); o.stop(a.ctx.currentTime + 0.36)
+    }
 
     const step = () => {
       const s = g.current
       const car = s.car
       s.t++
+      if (s.boostTimer > 0) s.boostTimer--
 
       // physics
       const up = s.keys.has('up'), down = s.keys.has('down')
       const left = s.keys.has('left'), right = s.keys.has('right')
-      if (up) car.speed += ACCEL
+      if (up && car.speed < MAX) car.speed += ACCEL
       if (down) car.speed -= REVERSE
       car.speed *= FRICTION
       if (Math.abs(car.speed) < 0.02) car.speed = 0
-      car.speed = Math.max(-MAX * 0.5, Math.min(MAX, car.speed))
+      // clamp allows temporary boost above MAX; friction decays it back down
+      car.speed = Math.max(-MAX * 0.5, Math.min(BOOST_MAX, car.speed))
 
       const moving = Math.abs(car.speed) > 0.15
       let steer = 0
@@ -294,6 +421,53 @@ export default function CreativePage() {
         setActiveId(nearest?.id ?? null)
       }
 
+      // collectibles
+      for (const c of s.coins) {
+        if (c.taken) continue
+        if (Math.hypot(c.x - car.x, c.y - car.y) < 24) {
+          c.taken = true
+          s.coinCount++
+          setCoins(s.coinCount)
+          playBlip(620 + Math.min(8, s.coinCount) * 30)
+          for (let i = 0; i < 10; i++) {
+            const a2 = Math.random() * Math.PI * 2
+            const sp = 1 + Math.random() * 2.4
+            s.particles.push({
+              x: c.x, y: c.y, vx: Math.cos(a2) * sp, vy: Math.sin(a2) * sp,
+              life: 1, max: 20 + Math.random() * 12, r: 2 + Math.random() * 2, c: '253,224,71',
+            })
+          }
+        }
+      }
+
+      // boost pads
+      for (const b of s.boosts) {
+        if (Math.hypot(b.x - car.x, b.y - car.y) < 32) {
+          if (s.boostTimer < 14) playWhoosh() // fire once per entry, not every frame
+          car.speed = Math.max(car.speed, BOOST)
+          s.boostTimer = 34
+          const back = car.angle + Math.PI
+          for (let i = 0; i < 6; i++) {
+            const sp = 2 + Math.random() * 2.5
+            s.particles.push({
+              x: car.x + Math.cos(back) * 14, y: car.y + Math.sin(back) * 14,
+              vx: Math.cos(back) * sp + (Math.random() - 0.5),
+              vy: Math.sin(back) * sp + (Math.random() - 0.5),
+              life: 1, max: 16 + Math.random() * 8, r: 3 + Math.random() * 3, c: '34,211,238',
+            })
+          }
+        }
+      }
+
+      // engine sound follows speed (silent while master gain is 0)
+      const a = audioRef.current
+      if (a) {
+        const rev = 55 + Math.min(1, Math.abs(car.speed) / MAX) * 150 + (s.boostTimer > 0 ? 90 : 0)
+        a.engOsc.frequency.setTargetAtTime(rev, a.ctx.currentTime, 0.08)
+        a.engOsc2.frequency.setTargetAtTime(rev * 1.5, a.ctx.currentTime, 0.08)
+        a.filter.frequency.setTargetAtTime(500 + Math.abs(car.speed) * 130, a.ctx.currentTime, 0.1)
+      }
+
       setSpeedKmh(Math.round(Math.abs(car.speed) * 18))
 
       draw(ctx)
@@ -345,6 +519,35 @@ export default function CreativePage() {
       }
       s.skids = s.skids.filter((sk) => sk.life > 0)
 
+      // boost pads (ground level)
+      for (const b of s.boosts) {
+        if (b.x < camX - 60 || b.x > camX + w + 60 || b.y < camY - 60 || b.y > camY + h + 60) continue
+        ctx.save()
+        ctx.translate(b.x, b.y)
+        ctx.rotate(b.angle)
+        ctx.fillStyle = 'rgba(8,47,73,0.65)'
+        roundRect(ctx, -24, -18, 48, 36, 9)
+        ctx.fill()
+        ctx.strokeStyle = 'rgba(34,211,238,0.5)'
+        ctx.lineWidth = 2
+        ctx.stroke()
+        for (let i = 0; i < 3; i++) {
+          const off = i * 13 - 14
+          const al = 0.35 + 0.55 * (0.5 + 0.5 * Math.sin(s.t * 0.18 - i * 0.7))
+          ctx.fillStyle = `rgba(34,211,238,${al})`
+          ctx.beginPath()
+          ctx.moveTo(off - 5, -12)
+          ctx.lineTo(off + 7, 0)
+          ctx.lineTo(off - 5, 12)
+          ctx.lineTo(off - 1, 12)
+          ctx.lineTo(off + 11, 0)
+          ctx.lineTo(off - 1, -12)
+          ctx.closePath()
+          ctx.fill()
+        }
+        ctx.restore()
+      }
+
       // station pads
       for (const st of STATIONS) {
         const pulse = 0.5 + 0.5 * Math.sin(s.t * 0.05 + st.x)
@@ -368,6 +571,22 @@ export default function CreativePage() {
         ctx.font = '600 14px ui-sans-serif, system-ui'
         ctx.fillStyle = '#fff'
         ctx.fillText(st.title, st.x, st.y - 66)
+      }
+
+      // coins
+      for (const c of s.coins) {
+        if (c.taken) continue
+        if (c.x < camX - 40 || c.x > camX + w + 40 || c.y < camY - 40 || c.y > camY + h + 40) continue
+        const spin = Math.cos(s.t * 0.1 + c.spin)
+        const width = Math.abs(spin) * 7 + 2
+        const bob = Math.sin(s.t * 0.08 + c.spin) * 3
+        // shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.22)'
+        ctx.beginPath(); ctx.ellipse(c.x, c.y + 9, 6, 2.5, 0, 0, Math.PI * 2); ctx.fill()
+        // coin face (squash to fake spin)
+        ctx.fillStyle = spin >= 0 ? '#fde047' : '#eab308'
+        ctx.beginPath(); ctx.ellipse(c.x, c.y - 4 + bob, width, 9, 0, 0, Math.PI * 2); ctx.fill()
+        ctx.strokeStyle = '#a16207'; ctx.lineWidth = 1.5; ctx.stroke()
       }
 
       // decorations
@@ -406,7 +625,7 @@ export default function CreativePage() {
       }
 
       // the car
-      drawCar(ctx, s.car)
+      drawCar(ctx, s.car, s.boostTimer > 0)
 
       ctx.restore()
 
@@ -424,9 +643,16 @@ export default function CreativePage() {
     s.cam = { x: 1900, y: 1500 }
     s.skids = []
     s.particles = []
+    s.boostTimer = 0
   }
 
+  // tear down the audio context when leaving the page
+  useEffect(() => {
+    return () => { audioRef.current?.ctx.close().catch(() => {}) }
+  }, [])
+
   const total = STATIONS.length
+  const coinTotal = g.current.coins.length
 
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col gap-3">
@@ -440,8 +666,18 @@ export default function CreativePage() {
             {speedKmh} km/h
           </span>
           <span className="rounded-full border border-neutral-300 px-3 py-1">
+            🪙 {coins}/{coinTotal}
+          </span>
+          <span className="hidden rounded-full border border-neutral-300 px-3 py-1 sm:inline">
             Discovered {found.size}/{total}
           </span>
+          <button
+            onClick={toggleSound}
+            title={soundOn ? 'Mute' : 'Enable sound'}
+            className="rounded-full border border-neutral-300 px-3 py-1 hover:bg-neutral-100"
+          >
+            {soundOn ? '🔊 Sound' : '🔇 Muted'}
+          </button>
           <button
             onClick={resetCar}
             className="rounded-full border border-neutral-300 px-3 py-1 hover:bg-neutral-100"
@@ -463,16 +699,19 @@ export default function CreativePage() {
             <div className="text-6xl">🚗💨</div>
             <h2 className="text-3xl font-bold text-white">Creative World</h2>
             <p className="max-w-md text-neutral-300">
-              An interactive, driveable portfolio. Cruise around an open world and roll over the
-              glowing pads to discover each section. There&apos;s even a hidden one — happy hunting.
+              An interactive, driveable portfolio. Cruise around an open world, roll over the
+              glowing pads to discover each section, grab the coins, and hit the cyan boost
+              strips for a speed rush. There&apos;s even a hidden section — happy hunting.
             </p>
             <button
-              onClick={() => setStarted(true)}
+              onClick={() => { initAudio(); setStarted(true) }}
               className="rounded-xl bg-cyan-400 px-8 py-3 text-lg font-bold text-neutral-900 transition hover:bg-cyan-300"
             >
               Start driving
             </button>
-            <p className="text-xs text-neutral-400">WASD / Arrow keys to drive · hold a turn at speed to drift</p>
+            <p className="text-xs text-neutral-400">
+              WASD / Arrows to drive · hold a turn at speed to drift · 🪙 collect coins · ⚡ hit boost pads · 🔊 sound is off by default
+            </p>
           </div>
         )}
 
@@ -528,13 +767,21 @@ function ControlBtn({ label, onChange }: { label: string; onChange: (down: boole
 }
 
 /* ----- draw helpers ----- */
-function drawCar(ctx: CanvasRenderingContext2D, car: { x: number; y: number; angle: number }) {
+function drawCar(ctx: CanvasRenderingContext2D, car: { x: number; y: number; angle: number }, boost = false) {
   ctx.save()
   ctx.translate(car.x, car.y)
   ctx.rotate(car.angle)
   // shadow
   ctx.fillStyle = 'rgba(0,0,0,0.3)'
   ctx.beginPath(); ctx.ellipse(2, 4, 20, 12, 0, 0, Math.PI * 2); ctx.fill()
+  // boost flames out the back (local -x is the rear)
+  if (boost) {
+    const len = 14 + Math.random() * 12
+    ctx.fillStyle = 'rgba(34,211,238,0.85)'
+    ctx.beginPath(); ctx.moveTo(-18, -7); ctx.lineTo(-18 - len, 0); ctx.lineTo(-18, 7); ctx.closePath(); ctx.fill()
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'
+    ctx.beginPath(); ctx.moveTo(-18, -4); ctx.lineTo(-18 - len * 0.6, 0); ctx.lineTo(-18, 4); ctx.closePath(); ctx.fill()
+  }
   // wheels
   ctx.fillStyle = '#111'
   ctx.fillRect(-14, -13, 9, 6)
@@ -561,7 +808,7 @@ function drawCar(ctx: CanvasRenderingContext2D, car: { x: number; y: number; ang
 
 function drawMinimap(
   ctx: CanvasRenderingContext2D,
-  s: { car: { x: number; y: number }; props: Prop[] },
+  s: { car: { x: number; y: number }; boosts: BoostPad[] },
   w: number,
 ) {
   const mw = 150, mh = (WORLD.h / WORLD.w) * 150
@@ -574,6 +821,11 @@ function drawMinimap(
   ctx.strokeStyle = 'rgba(120,160,255,0.3)'
   ctx.lineWidth = 1
   ctx.strokeRect(x, y, mw, mh)
+  // boost pads
+  for (const b of s.boosts) {
+    ctx.fillStyle = 'rgba(34,211,238,0.7)'
+    ctx.fillRect(x + b.x * sx - 1.5, y + b.y * sy - 1.5, 3, 3)
+  }
   // stations
   for (const st of STATIONS) {
     ctx.fillStyle = st.secret ? 'rgba(252,211,77,0.5)' : hexA(st.color, 0.9)
