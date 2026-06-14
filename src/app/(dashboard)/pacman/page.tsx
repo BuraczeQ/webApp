@@ -95,11 +95,6 @@ export default function PacmanPage() {
   }, [supabase])
 
   useEffect(() => {
-    supabase.from('pacman_scores').select('score').order('score',{ascending:false}).limit(1)
-      .then(({ data }) => {
-        // my best — filter by user via RLS on insert, but select all for leaderboard
-        // actually get my own best separately
-      })
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) return
       supabase.from('pacman_scores').select('score')
@@ -185,15 +180,15 @@ export default function PacmanPage() {
     const r = s.current
     if (r.phase!=='playing') return
     r.frame++
-    r.mouthOpen ? (r.mouthAngle+=0.12, r.mouthAngle>=0.4&&(r.mouthOpen=false))
-                : (r.mouthAngle-=0.12, r.mouthAngle<=0.02&&(r.mouthOpen=true))
+    if (r.mouthOpen) { r.mouthAngle+=0.12; if(r.mouthAngle>=0.4) r.mouthOpen=false }
+    else { r.mouthAngle-=0.12; if(r.mouthAngle<=0.02) r.mouthOpen=true }
     if (ts - lastRef.current > 150) {
       lastRef.current=ts
       const nd=r.nextDir
       if ((nd.x||nd.y) && canMove(r.map,r.pacX+nd.x,r.pacY+nd.y)) r.pacDir=nd
       const d=r.pacDir
       if (d.x||d.y) {
-        let nx=r.pacX+d.x, ny=r.pacY+d.y
+        let nx=r.pacX+d.x; const ny=r.pacY+d.y
         if (nx<0) nx=COLS-1; if (nx>=COLS) nx=0
         if (canMove(r.map,nx,ny)) {
           r.pacX=nx; r.pacY=ny
